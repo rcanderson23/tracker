@@ -1,0 +1,26 @@
+[package]
+name = "tracker-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya-bpf = { git = "http://github.com/aya-rs/aya", branch = "main" }
+aya-bpf-cty = { git = "http://github.com/aya-rs/aya", branch = "main" }
+tracker-common = { path = "../tracker-common" }
+memoffset = "0.6"
+aya-log-ebpf = { git = "https://github.com/aya-rs/aya-log", branch = "main" }
+
+[[bin]]
+name = "tracker"
+path = "src/main.rs"
+
+[profile.dev]
+panic = "abort"
+overflow-checks = false
+
+[profile.release]
+panic = "abort"
+
+[workspace]
+members = []
+

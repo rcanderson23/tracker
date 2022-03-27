@@ -1,31 +1,28 @@
 use anyhow::Context;
 use axum::{routing::get, Router};
 use aya::{
-    maps::perf::AsyncPerfEventArrayBuffer,
     maps::HashMap,
     maps::{perf::AsyncPerfEventArray, MapRefMut},
     programs::{Xdp, XdpFlags},
     util::online_cpus,
     Bpf,
 };
-use bytes::BytesMut;
 use clap::Parser;
-use metrics::{increment_counter, register_counter};
+use metrics::register_counter;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::{
     fs,
     future::ready,
-    net::{self, IpAddr, SocketAddr},
+    net::{IpAddr, SocketAddr},
 };
 use tokio::{signal, sync::mpsc::UnboundedSender, task};
-use tokio::{
-    sync::{mpsc, mpsc::UnboundedReceiver},
-    time::Instant,
-};
+use tokio::sync::{mpsc, mpsc::UnboundedReceiver};
 use tracing::{error, info};
 use tracker_common::{Connection, ConnectionV6};
 mod tracker;
+mod events;
 use tracker::{Syn, Tracker};
+use events::*;
 
 /// Program to track and block port scanners
 #[derive(Parser, Debug)]
@@ -76,8 +73,8 @@ async fn main() -> Result<(), anyhow::Error> {
     for cpu_id in online_cpus()? {
         let buf_v4 = perf_array.open(cpu_id, None)?;
         let buf_v6 = perf_array_v6.open(cpu_id, None)?;
-        start_event_loop_v4(tx.clone(), buf_v4).await;
-        start_event_loop_v6(tx.clone(), buf_v6).await;
+        event_loop::<Connection>(tx.clone(), buf_v4).await;
+        event_loop::<ConnectionV6>(tx.clone(), buf_v6).await;
     }
 
     info!("starting blocker");
@@ -106,68 +103,6 @@ async fn setup_metrics_server() {
     });
 }
 
-async fn start_event_loop_v4(
-    tx: UnboundedSender<Syn>,
-    mut buf: AsyncPerfEventArrayBuffer<MapRefMut>,
-) {
-    task::spawn(async move {
-        let mut buffers = (0..10)
-            .map(|_| BytesMut::with_capacity(65536))
-            .collect::<Vec<_>>();
-
-        loop {
-            let events = buf.read_events(&mut buffers).await.unwrap();
-            for event in buffers.iter_mut().take(events.read) {
-                increment_counter!("connection_attempts");
-                let ptr = event.as_ptr() as *const Connection;
-                let data = unsafe { ptr.read_unaligned() };
-                let source_ip = net::Ipv4Addr::from(data.source_ip);
-                let source_port = data.source_port;
-                let dest_ip = net::Ipv4Addr::from(data.dest_ip);
-                let dest_port = data.dest_port;
-                info!("{}:{} -> {}:{}", source_ip, source_port, dest_ip, dest_port);
-                tx.send(Syn {
-                    source_ip: source_ip.into(),
-                    dest_port,
-                    observation: Instant::now(),
-                })
-                .unwrap();
-            }
-        }
-    });
-}
-
-async fn start_event_loop_v6(
-    tx: UnboundedSender<Syn>,
-    mut buf: AsyncPerfEventArrayBuffer<MapRefMut>,
-) {
-    task::spawn(async move {
-        let mut buffers = (0..10)
-            .map(|_| BytesMut::with_capacity(65536))
-            .collect::<Vec<_>>();
-
-        loop {
-            let events = buf.read_events(&mut buffers).await.unwrap();
-            for event in buffers.iter_mut().take(events.read) {
-                increment_counter!("connection_attempts");
-                let ptr = event.as_ptr() as *const ConnectionV6;
-                let data = unsafe { ptr.read_unaligned() };
-                let source_ip = net::Ipv6Addr::from(data.source_ip);
-                let source_port = data.source_port;
-                let dest_ip = net::Ipv6Addr::from(data.dest_ip);
-                let dest_port = data.dest_port;
-                info!("{}:{} -> {}:{}", source_ip, source_port, dest_ip, dest_port);
-                tx.send(Syn {
-                    source_ip: source_ip.into(),
-                    dest_port,
-                    observation: Instant::now(),
-                })
-                .unwrap();
-            }
-        }
-    });
-}
-
 async fn start_block_loop(
     mut rx: UnboundedReceiver<IpAddr>,
     mut blocklist_v4: HashMap<MapRefMut, u32, u32>,
@@ -188,3 +123,4 @@ async fn start_block_loop(
         }
     });
 }
+
